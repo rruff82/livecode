@@ -1,31 +1,48 @@
 # -*- coding: utf-8 -*-
 """
 Created on Mon Jul  2 18:38:42 2018
+Live Coding a Music Synthesizer!
 
 @author: Ryan Ruff
 
-This is my first live streaming session!
+MIT License
 
-I'm going to attempt to create music using Python!
+Copyright (c) 2018 Ryan Ruff (rruff82@gmail.com)
 
-Let's start with some imports
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.    
+    
 """
 
 import numpy as np
 import sounddevice as sd
 import matplotlib
 import matplotlib.pyplot as plt
+from scipy import signal
 
 tau = np.pi*2
 sr = 44100
 
-dur = 24
-t = np.arange(0,dur,1/sr)
-
+blocksize = 1024
 
 
 def plotfunc(fn,a=0,b=dur):
-    x = np.arange(a,b,(b-a)/500)
+    x = np.linspace(a,b,500)
     fig, graph = plt.subplots()
 
     graph.plot(x,fn(x))
@@ -33,17 +50,16 @@ def plotfunc(fn,a=0,b=dur):
     plt.show()
     return;
 
-def playfunc(fn):
-
-    
+def playfunc(fn,dur=1):    
+    t = np.arange(0,dur,1/sr)
     out = fn(t)
     sd.play(out)
     return;    
 
 
-def plotnplay(fn):
+def plotnplay(fn,dur=1):
     plotfunc(fn,0,.01)
-    playfunc(fn)
+    playfunc(fn,dur)
     return;
     
     
@@ -51,88 +67,126 @@ def plotnplay(fn):
 def A440(t):
     return np.sin(tau*440*t);
 
-plotnplay(A440)
+
 
 def envelope(x):
     return np.power((1-(x%.25)),15)
 
 
-plot(envelope,0,1)
+
 
 def mySound(t):
     return A440(t/2)*envelope(t);
 
 
-def createSnare():
-    whitenoise = np.random.uniform(-1,1,sr*dur) 
+def createSnare(t):
+    whitenoise = np.random.uniform(-1,1,t.size) 
     snare_env = envelope(t)
     snare_pitch = np.sin(220*tau*t)
     return snare_env*snare_pitch*whitenoise;
 
-snare = createSnare()
-sd.play(snare)
 
 def bassPitchShift(t):
     return (1-(t%.5));
-plot(bassPitchShift,0,dur)
+
 
 def bassEnv(t):
     return np.power((1-2*(t%.5)),.5);
-plotfunc(bassEnv)
+
 
 def bassSound(t):
     return np.sin(55*tau*(t%.5)*(1-.5*(t%.5)));
 
-plotnplay(bassSound)
 
-def createBass():
+
+def createBass(t):
     return bassSound(t)*bassEnv(t);
-bass = createBass()
+bass = createBass(t)
 
-sd.play(bass)
 
-sd.play( (bass+snare)/2 )
-
+def createDnB(t):
+    return (createBass(t)+createSnare(t));
 
 def thick_sound(t):
     return (A440(t)+A440(2*t)/2+A440(3*t)/3+A440(4*t)/4+A440(5*t)/5+A440(6*t)/6+A440(8*t)/8)/2;
 
-plotnplay(lambda x: thick_sound(x/2))
+
 
 def majorChord(t):
     return (thick_sound(t/2)+thick_sound(t*5/4)+thick_sound(t*3/2)+thick_sound(t))/2
 
-plotnplay(majorChord)
+
 
 def pianoEnv(t):
     return 1-(t%1);
 
 
+def step(t):
+    return np.heaviside(t,1);
+
+
 def pianoPitchShift(x):
-    if (x < 4):
-        return 1;
-    elif (x < 8):
-        return 1.5;
-    elif (x < 12):
-        return 1;
-    elif (x < 16):
-        return 4/3;
-    elif (x < 20):
-        return 3/2;
-    else:
-        return 1;
+    return 1+(1/3)*step(x-8)-(1/3)*step(x-12)+(1/2)*step(x-16)-(1/6)*step(x-20);
 
-def createPiano():
-    return pianoEnv(t)*[majorChord(a*pianoPitchShift(a)) for a in t];
+plotfunc(pianoPitchShift)
+
+def createPiano(t):
+    return pianoEnv(t)*majorChord(t*pianoPitchShift(t%24));
 
 
-piano = createPiano()
+def createBasicLoop(t):
+    return (.5*createPiano(t)+.2*createSnare(t)+3*createBass(t))/4;
 
-sd.play(piano)
 
-sd.play( (piano+bass+snare)/3 )
 
-# Thanks for watching!!!!!
-# to be continued?
+def createGuitarSound(t):
+    return .20*signal.square(220*tau*t);
+
+
+
+def createADSR(A,D,S,R,L):
+    decay_rate = (1-S)/D;
+    release_rate = S/R;
+    release_start = L-R;
+    return (lambda t: step(t)*t/A*(1-step(t-A))
+            +step(t-A)*(2*A-t)*decay_rate*(1-step(t-A-D))
+            +step(t-A-D)*S*(1-step(t-release_start))
+            +step(t-release_start)*((release_start-t)*release_rate+S)*(1-step(t-L)));
+            
+
+
+plotfunc(createADSR(.05,.025,.5,.2,1),0,1)
+
+
+def createGuitar(t):
+    guitar_env = createADSR(.05,.025,.5,.2,1)
+    return createGuitarSound(t)*guitar_env(t);
+
+plotnplay(createGuitar,2)
+
+
+sd.stop()
+
+def callback(indata, outdata, frames, time, status):
+    if status:
+        print(status) 
+    timedata = np.arange(time.outputBufferDacTime,time.outputBufferDacTime+frames/sr,1/sr)
+    outdata[:,0] = createBasicLoop(timedata)
+    return;
+    
+def finished_callback():
+    print("we're done, now what?")
+
+def playback_loop():
+    with sd.Stream(channels=1, callback=callback, samplerate=sr, blocksize=blocksize, finished_callback=finished_callback):
+        sd.sleep(int(dur * 1000))
+
+playback_loop()
+
+strm = sd.Stream(channels=1, callback=callback, samplerate=sr, blocksize=blocksize, finished_callback=finished_callback)
+strm.start()
+
+strm.stop()
+
 
 
