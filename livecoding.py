@@ -27,12 +27,18 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.    
     
+
+TODO:
+    Eliminate "click" when starting new measure
+    Randomized Rhythms
+
 """
 
 import numpy as np
 import sounddevice as sd
 import matplotlib
 import matplotlib.pyplot as plt
+import queue
 from scipy import signal
 
 tau = np.pi*2
@@ -40,6 +46,23 @@ sr = 44100
 
 blocksize = 1024
 
+equal_temperament = {'A1': 1, 'A#1': 2**(1/12), 'B1': 2**(2/12),
+                     'C1': 2**(3/12), 'C#1': 2**(4/12), 'D1':2**(5/12),
+                     'D#1': 2**(6/12), 'E1':2**(7/12), 'F1': 2**(8/12),
+                     'F#1': 2**(9/12), 'G1':2**(10/12), 'G#1':2**(11/12),
+                     'A2': 2, 'A#2': 2**(13/12), 'B2': 2**(14/12),
+                     'C2': 2**(15/12), 'C#2': 2**(16/12), 'D2':2**(17/12),
+                     'D#2': 2**(18/12), 'E2':2**(19/12), 'F2': 2**(20/12),
+                     'F#2': 2**(21/12), 'G2':2**(22/12), 'G#2':2**(23/12)}
+                     
+current_key = equal_temperament['C1']
+
+
+def zero_function(t):
+    return 0;
+
+def step(t):
+    return np.heaviside(t,1);
 
 def plotfunc(fn,a=0,b=1):
     x = np.linspace(a,b,500)
@@ -67,71 +90,255 @@ def plotnplay(fn,dur=1):
 def A440(t):
     return np.sin(tau*440*t);
 
+def major_chord(t):
+    return (A440(t/2)+A440(t*5/4)+A440(t*3/2)+A440(t))/2
 
+def minor_chord(t):
+    return (A440(t/2)+A440(t*6/5)+A440(t*3/2)+A440(t))/2
 
-def envelope(x):
-    return np.power((1-(x%.25)),15)
+def dim7_chord(t):
+    return (A440(t/2)+A440(t*6/5)+A440(t*7/5)+A440(5/3)+A440(t))/2
+    
 
-
-
-
-def mySound(t):
-    return A440(t/2)*envelope(t);
-
-
-def createSnare(t):
-    whitenoise = np.random.uniform(-1,1,t.size) 
-    snare_env = envelope(t)
-    snare_pitch = np.sin(220*tau*t)
-    return snare_env*snare_pitch*whitenoise;
-
-
-def bassPitchShift(t):
-    return (1-(t%.5));
-
-
-def bassEnv(t):
-    return np.power((1-2*(t%.5)),.5);
-
-
-def bassSound(t):
-    return np.sin(55*tau*(t%.5)*(1-.5*(t%.5)));
+standard_chords = [major_chord,(lambda x: minor_chord(x*2**(2/12))),
+                   (lambda x: major_chord(x*2**(4/12))),(lambda x: major_chord(x*2**(5/12))),
+                   (lambda x: major_chord(x*2**(7/12))),(lambda x: minor_chord(x*2**(9/12))),
+                   (lambda x: dim7_chord(x*2**(11/12)))]
 
 
 
-def createBass(t):
-    return bassSound(t)*bassEnv(t);
+class Phrase: 
+    beats_per_measure = 4
+    measures_per_phrase = 12
+    beats_per_minute = 120
+    start_time = 0
+
+    def seconds_per_beat(self):
+        return 60/self.beats_per_minute;
+
+    def seconds_per_measure(self):
+        return self.seconds_per_beat()*self.beats_per_measure;
+
+    def seconds_per_phrase(self):
+        return self.seconds_per_measure()*self.measures_per_phrase;
+    
+    def get_func_by_measure(self,i):
+        return np.full(int(self.seconds_per_measure()*sr),0);
+    
+    def get_measure_by_time(self,t):
+        return np.floor_divide(t-self.start_time,self.seconds_per_measure()) % self.measures_per_phrase;
+    
+    def get_measure_start_time(self,i):
+        return self.start_time+i*self.seconds_per_measure();
+    
+    def render_phrase(self):
+        for i in range(self.measures_per_phrase):
+           t = np.arange(self.get_measure_start_time(i),self.get_measure_start_time(i)+self.seconds_per_measure(),1/sr)
+           fn = self.get_func_by_measure(i)
+           if (i == 0):
+               out = fn(t)
+           else:
+               out = np.append(out,fn(t))
+        return out;
+            
+    
+
+
+null_phrase = Phrase();
+
+
+class DrumAndBass(Phrase):
+    def snare_envelope(self,x):
+        return np.power((1-(x%1)),15)
+    
+    def mySound(self,t):
+        return A440(t/2)*self.snare_envelope(t);
+    
+    
+    def createSnare(self,t):
+        whitenoise = np.random.uniform(-1,1,t.size) 
+        snare_env = self.snare_envelope(t/self.seconds_per_beat())
+        snare_pitch = np.sin(220*tau*t*current_key)
+        return snare_env*snare_pitch*whitenoise;
+
+
+    def bassEnv(self,t):
+        return np.power((1-(t%(2*self.seconds_per_beat()))/(2*self.seconds_per_beat())),2);
+    
+    
+    def bassFreq(self,t):
+        return 1-(t%(2*self.seconds_per_beat()))/(4*self.seconds_per_beat());
+    
+    
+    def bassSound(self,t):
+        return np.sin(55*tau*(t%(2*self.seconds_per_beat()))*current_key*self.bassFreq(t));
+    
+    
+    def createBass(self,t):
+        return self.bassSound(t)*self.bassEnv(t);
+    
+    def get_func_by_measure(self,i):
+        return (lambda t: self.createBass(t-self.start_time)+self.createSnare(t-self.start_time));
+    
 
 
 
-def createDnB(t):
-    return (createBass(t)+createSnare(t));
-
-def thick_sound(t):
-    return (A440(t)+A440(2*t)/2+A440(3*t)/3+A440(4*t)/4+A440(5*t)/5+A440(6*t)/6+A440(8*t)/8)/2;
 
 
-
-def majorChord(t):
-    return (thick_sound(t/2)+thick_sound(t*5/4)+thick_sound(t*3/2)+thick_sound(t))/2
+dnb_phrase = DrumAndBass();
 
 
-
-def pianoEnv(t):
-    return 1-(t%1);
-
-
-def step(t):
-    return np.heaviside(t,1);
+phrase_test = dnb_phrase.render_phrase()
+sd.play(phrase_test)
 
 
-def pianoPitchShift(x):
-    return 1+(1/3)*step(x-8)-(1/3)*step(x-12)+(1/2)*step(x-16)-(1/6)*step(x-20);
+class SimpleBlues(DrumAndBass):
+    def thick_sound(self,t):
+        return (A440(t)+A440(2*t)/2+A440(3*t)/3+A440(4*t)/4+A440(5*t)/5+A440(6*t)/6+A440(8*t)/8)/2;
+
+#    def majorChord(self,t):
+#        return (self.thick_sound(t/2)+self.thick_sound(t*5/4)+self.thick_sound(t*3/2)+self.thick_sound(t))/2
+
+    def majorChord(self,t):
+        return (A440(t/2)+A440(t*5/4)+A440(t*3/2)+A440(t))/2
 
 
 
-def createPiano(t):
-    return pianoEnv(t)*majorChord(t*pianoPitchShift(t%24));
+    def pianoEnv(self,t):
+        return 1-((t/self.seconds_per_beat())%1);
+
+
+    def pitch_shift_by_measure(self,x):
+        return 1+(1/3)*step(x-4)-(1/3)*step(x-6)+(1/2)*step(x-8)-(1/6)*step(x-10);
+
+    def createPiano(self,t,i):
+        return self.pianoEnv(t-self.get_measure_start_time(i))*self.majorChord(current_key*(t-self.get_measure_start_time(i))*self.pitch_shift_by_measure(i));
+
+    def get_func_by_measure(self,i):
+        dnb = super().get_func_by_measure(i)
+        return (lambda t: (.5*self.createPiano(t,i)+2*dnb(t))/3);
+
+piano_phrase = SimpleBlues()
+
+
+
+phrase_test = piano_phrase.render_phrase()
+sd.play(phrase_test)
+
+"""
+Standard Blues Progression
+        I    __
+        vi  /\
+     /        \
+    /         _\/
+  \/_
+V     ----->    IV    
+vii^0           ii
+
+"""
+
+
+blues_matrix= np.matrix([[2,1,0,1,1,1,1],
+                         [1,1,0,1,0,1,0],
+                         [0,0,0,0,0,0,0],
+                         [1,1,0,1,0,1,0],
+                         [0,1,0,1,1,0,1],
+                         [1,1,0,1,1,1,1],
+                         [0,1,0,1,1,0,1]])
+    
+blues_matrix_major = np.matrix([[2,0,0,1,1,0,0],
+                                [1,0,0,1,0,0,0],
+                                [0,0,0,0,0,0,0],
+                                [1,0,0,1,0,0,0],
+                                [0,0,0,1,1,0,0],
+                                [1,0,0,1,1,0,0],
+                                [0,0,0,1,1,0,0]])
+    
+blues_matrix_minor = np.matrix([[0,1,0,0,0,1,1],
+                                [0,1,0,0,0,1,0],
+                                [0,0,0,0,0,0,0],
+                                [0,1,0,0,0,1,0],
+                                [0,1,0,0,0,0,1],
+                                [0,1,0,0,0,2,1],
+                                [0,1,0,0,0,0,1]])
+    
+major_weight = 1
+minor_weight = .5
+
+def get_weighted_blues_matrix():
+    return blues_matrix_major*major_weight+blues_matrix_minor*minor_weight;
+
+    
+    
+index_to_number = np.matrix([[1,0,0,0,0,0,0],
+                             [0,2,0,0,0,0,0],
+                             [0,0,3,0,0,0,0],
+                             [0,0,0,4,0,0,0],
+                             [0,0,0,0,5,0,0],
+                             [0,0,0,0,0,6,0],
+                             [0,0,0,0,0,0,7]])
+    
+start_vec = np.matrix([[1,0,0,0,0,0,0]])
+
+edge_choices = np.matmul(start_vec,blues_matrix)
+np.matmul(edge_choices,index_to_number)
+
+
+def random_walk(pos,adj_mat):
+    start_vec = np.full(adj_mat.shape[0],0)
+    start_vec[pos-1] = 1
+    edge_choices = np.matmul(np.matrix([start_vec]),adj_mat)
+    weights = np.array(edge_choices)[0]
+    weights = weights/ np.sum(weights)
+    return np.random.choice([1,2,3,4,5,6,7],p=weights)
+    
+
+def create_walk(start_pos,adj_mat,num_steps):
+    steps = np.arange(0,num_steps,1)
+    for i in range(num_steps):
+        if (i == 0):
+            steps[i] = start_pos
+        else:
+            steps[i] = random_walk(steps[i-1],adj_mat)
+    return steps;
+
+test_walk = create_walk(1,blues_matrix,12)
+    
+class RandomBlues(DrumAndBass):
+    chord_progression = np.array(0)
+    def __init__(self,adjacency_matrix):
+        weights = np.array([major_weight,minor_weight])
+        weights = weights / weights.sum()
+        self.chord_progression = create_walk(np.random.choice([1,6],p=weights),blues_matrix,12)
+        
+    def chord_by_measure(self,i):
+        return standard_chords[self.chord_progression[int(i)]-1]
+            
+    def pianoEnv(self,t):
+        return 1-((t/self.seconds_per_beat())%1);
+
+    def createPiano(self,t,i):
+        cur_chord = self.chord_by_measure(i)
+        return self.pianoEnv(t-self.get_measure_start_time(i))*cur_chord(current_key*(t-self.get_measure_start_time(i)));
+
+    def get_func_by_measure(self,i):
+        dnb = super().get_func_by_measure(i)
+        return (lambda t: (.5*self.createPiano(t,i)+2*dnb(t))/3);
+
+       
+        
+random_phrase = RandomBlues(get_weighted_blues_matrix())
+print(random_phrase.chord_progression)
+
+
+test_sample = random_phrase.render_phrase()
+sd.play(test_sample)
+
+
+
+random_phrase1 = RandomBlues(get_weighted_blues_matrix())
+random_phrase2 = RandomBlues(get_weighted_blues_matrix())
+
 
 
 def createBasicLoop(t):
@@ -154,32 +361,22 @@ def createADSR(A,D,S,R):
             
 
 
-plotfunc(createADSR(.05,.025,.5,.2,1),0,1)
 
 
 def createGuitar(t):
     guitar_env = createADSR(.05,.025,.5,.2)
     return createGuitarSound(t)*guitar_env(t,1);
 
-plotnplay(createGuitar,2)
 
 
-equal_temperament = {'A1': 1, 'A#1': 2**(1/12), 'B1': 2**(2/12),
-                     'C1': 2**(3/12), 'C#1': 2**(4/12), 'D1':2**(5/12),
-                     'D#1': 2**(6/12), 'E1':2**(7/12), 'F1': 2**(8/12),
-                     'F#1': 2**(9/12), 'G1':2**(10/12), 'G#1':2**(11/12),
-                     'A2': 2, 'A#2': 2**(13/12), 'B2': 2**(14/12),
-                     'C2': 2**(15/12), 'C#2': 2**(16/12), 'D2':2**(17/12),
-                     'D#2': 2**(18/12), 'E2':2**(19/12), 'F2': 2**(20/12),
-                     'F#2': 2**(21/12), 'G2':2**(22/12), 'G#2':2**(23/12)}
+
 
 def create_note(timbre,envolope,start,length,pitch):
     return (lambda t: timbre((t-start)*pitch)*envolope(t-start,length))
 
 melody_time = 0
 
-def zero_function(t):
-    return 0;
+
 
 def new_note(note,length):
     global melody_time
@@ -194,7 +391,7 @@ note_sequence = zero_function
 
 def append_note(note,length):
     global note_sequence;
-    note_sequence = add_funcs(note_sequence,new_note(note,length))
+    note_sequence = add_funcs(note_sequence,new_note(note,length*seconds_per_beat()))
 
 
 def star_spangled_banner():
@@ -223,27 +420,86 @@ def star_spangled_banner():
     plotnplay(note_sequence,melody_time)
     
 
+def blues_scale():
+    global note_sequence;
+    global melody_time;
+    melody_time = 0;
+    note_sequence = zero_function;
+    melody = [('C1',1), ('D#1',1), ('F1',1), ('F#1',1), ('G1',1),
+               ('A#2',.5), ('C2',1.5)]
+    for n in melody:
+        append_note(n[0],n[1])
+    plotnplay(note_sequence,melody_time)  
+
+blues_scale()
+
+phrase_queue = queue.Queue()
+
+
+
+
+def fill_buffer(frames, time):
+    if (fill_buffer.current_phrase is None):
+        if (phrase_queue.empty()):
+            return np.full(frames,0);
+        else:
+            fill_buffer.current_phrase = phrase_queue.get();
+            fill_buffer.current_phrase.start_time = time;
+            print("Starting new phrase")
+    timedata = np.arange(time,time+frames/sr,1/sr)
+    current_measure = fill_buffer.current_phrase.get_measure_by_time(timedata[0])
+    end_measure = fill_buffer.current_phrase.get_measure_by_time(timedata[-1])
+    if (current_measure == end_measure):
+        measure_func = fill_buffer.current_phrase.get_func_by_measure(current_measure)
+        return measure_func(timedata);
+    elif(end_measure < current_measure and not phrase_queue.empty()):
+        print("Starting new measure and new phrase")
+        first_measure_func = fill_buffer.current_phrase.get_func_by_measure(current_measure)
+        transition_time = fill_buffer.current_phrase.get_measure_start_time(end_measure)
+        left_half = first_measure_func(timedata)*(1-step(timedata-transition_time));
+        fill_buffer.current_phrase = phrase_queue.get();
+        fill_buffer.current_phrase.start_time = transition_time;
+        second_measure_func = fill_buffer.current_phrase.get_func_by_measure(current_measure)
+        right_half = second_measure_func(timedata)*step(timedata-transition_time);
+        return left_half + right_half;
+    else:
+        print("Starting new measure")
+        first_measure_func = fill_buffer.current_phrase.get_func_by_measure(current_measure)
+        second_measure_func = fill_buffer.current_phrase.get_func_by_measure(current_measure)
+        transition_time = fill_buffer.current_phrase.get_measure_start_time(end_measure)
+        left_half = first_measure_func(timedata)*(1-step(timedata-transition_time));
+        right_half = second_measure_func(timedata)*step(timedata-transition_time);
+        return left_half + right_half;
+    
+    
+
+fill_buffer.current_phrase = None
+phrase_queue.put(dnb_phrase)
+phrase_queue.put(random_phrase1)
+phrase_queue.put(random_phrase1)
+phrase_queue.put(random_phrase2)
+phrase_queue.put(random_phrase1)
+
 
 
 
 def callback(indata, outdata, frames, time, status):
     if status:
         print(status) 
-    timedata = np.arange(time.outputBufferDacTime,time.outputBufferDacTime+frames/sr,1/sr)
-    outdata[:,0] = note_sequence(timedata)
+    outdata[:,0] = fill_buffer(frames, time.outputBufferDacTime)
     return;
     
 def finished_callback():
     print("we're done, now what?")
 
-def playback_loop():
-    with sd.Stream(channels=1, callback=callback, samplerate=sr, blocksize=blocksize, finished_callback=finished_callback):
-        sd.sleep(int(dur * 1000))
-
-playback_loop()
 
 strm = sd.Stream(channels=1, callback=callback, samplerate=sr, blocksize=blocksize, finished_callback=finished_callback)
 strm.start()
+
+
+
+
+phrase_queue.put(piano_phrase)
 
 strm.stop()
 
