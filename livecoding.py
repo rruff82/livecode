@@ -30,7 +30,6 @@ SOFTWARE.
 
 TODO:
     Eliminate "click" when starting new measure
-    Randomized Rhythms
 
 """
 
@@ -60,6 +59,9 @@ current_key = equal_temperament['C1']
 
 def zero_function(t):
     return 0;
+
+def add_funcs(f1,f2):
+    return (lambda t: (f1(t)+f2(t)))
 
 def step(t):
     return np.heaviside(t,1);
@@ -112,6 +114,7 @@ class Phrase:
     measures_per_phrase = 12
     beats_per_minute = 120
     start_time = 0
+    prerender = None
 
     def seconds_per_beat(self):
         return 60/self.beats_per_minute;
@@ -129,7 +132,7 @@ class Phrase:
         return np.floor_divide(t-self.start_time,self.seconds_per_measure()) % self.measures_per_phrase;
     
     def get_measure_start_time(self,i):
-        return self.start_time+i*self.seconds_per_measure();
+        return self.start_time+i*self.seconds_per_measure();  
     
     def render_phrase(self):
         for i in range(self.measures_per_phrase):
@@ -140,6 +143,29 @@ class Phrase:
            else:
                out = np.append(out,fn(t))
         return out;
+    
+    
+    def prerender(self):
+        for i in range(self.measures_per_phrase):
+            t = np.arange(self.get_measure_start_time(i),self.get_measure_start_time(i)+self.seconds_per_measure(),1/sr)
+            fn = self.get_func_by_measure(i)
+            if (i == 0):
+                self.prerender = fn(t)
+            else:
+                self.prerender = np.append(self.prerender,fn(t))
+            
+    def get_prerender_by_time(self,t):
+        if (self.prerender is None):
+            self.prerender()
+        start_frame = int((t[0]-self.start_time%self.seconds_per_phrase())/sr)
+        end_frame = int((t[-1]-self.start_time%self.seconds_per_phrase())/sr)
+        
+        if (end_frame > start_frame):
+            self.prerender[start_frame:end_frame]
+        else:
+            np.append(self.prerender[start_frame:],self.prerender[:end_frame])
+            
+    
             
     
 
@@ -188,8 +214,12 @@ class DrumAndBass(Phrase):
 dnb_phrase = DrumAndBass();
 
 
-phrase_test = dnb_phrase.render_phrase()
-sd.play(phrase_test)
+dnb_phrase.prerender()
+
+sd.play(dnb_phrase.get_prerender_by_time(np.arange(0,1,1/sr)))
+
+#phrase_test = dnb_phrase.render_phrase()
+#sd.play(phrase_test)
 
 
 class SimpleBlues(DrumAndBass):
@@ -222,8 +252,8 @@ piano_phrase = SimpleBlues()
 
 
 
-phrase_test = piano_phrase.render_phrase()
-sd.play(phrase_test)
+#phrase_test = piano_phrase.render_phrase()
+#sd.play(phrase_test)
 
 """
 Standard Blues Progression
@@ -303,23 +333,64 @@ def create_walk(start_pos,adj_mat,num_steps):
     return steps;
 
 test_walk = create_walk(1,blues_matrix,12)
+
+
+def random_rhythm(num_frames,density=.5):
+    my_rands = np.random.uniform(0,1,num_frames)
+    odds = 1-(np.arange(num_frames)%2)
+    every_other_odd = (np.arange(2,num_frames+2,1)%4)*odds/2
+    every_fourth_odd = step(np.arange(7,num_frames+7,1)%8-7)
+    my_mask = np.full(num_frames,1)+odds/8 + every_other_odd/4 + every_fourth_odd/2
+    return step(my_rands-density)
+
+def createADSR(A,D,S,R):
+    decay_rate = (1-S)/D;
+    release_rate = S/R;
+    return (lambda t,L: step(t)*t/A*(1-step(t-A))  
+            +step(t-A)*(-decay_rate*t+1+A*decay_rate)*(1-step(t-A-D))
+            +step(t-A-D)*S*(1-step(t-(L-R)))
+            +step(t-(L-R))*(((L-R)-t)*release_rate+S)*(1-step(t-L)));
+
+
+def create_note_env(start,length,ADSR=createADSR(1/64,1/32,.75,1/32)):
+    return (lambda t: ADSR(t-start,length));
+                        
+test_env = create_note_env(0,1)
+plotfunc(test_env)
+
+rhythm_pattern = random_rhythm(16)
+
+def generate_envolope_from_rhythm(pattern):
+    env = zero_function
+    for i in range(len(pattern)):
+        if (pattern[i] == 1):
+            env = add_funcs(env,create_note_env(i,1))
+    return env
+
+test_env = generate_envolope_from_rhythm(rhythm_pattern)
+
+plotfunc(test_env,0,16)
     
 class RandomBlues(DrumAndBass):
     chord_progression = np.array(0)
+    rhythm_pattern = np.array(0)
+    rhythm_env = zero_function
     def __init__(self,adjacency_matrix):
         weights = np.array([major_weight,minor_weight])
         weights = weights / weights.sum()
-        self.chord_progression = create_walk(np.random.choice([1,6],p=weights),blues_matrix,12)
-        
+        self.chord_progression = create_walk(np.random.choice([1,6],p=weights),blues_matrix,6)
+        self.rhythm_pattern = random_rhythm(16)
+        self.rhythm_env = generate_envolope_from_rhythm(self.rhythm_pattern)
     def chord_by_measure(self,i):
-        return standard_chords[self.chord_progression[int(i)]-1]
+        return standard_chords[self.chord_progression[int(np.floor(i/2))]-1] 
             
     def pianoEnv(self,t):
-        return 1-((t/self.seconds_per_beat())%1);
+       adj_t = (t-self.start_time)%(self.seconds_per_measure()*2)
+       return self.rhythm_env(adj_t*8*self.seconds_per_beat());
 
     def createPiano(self,t,i):
         cur_chord = self.chord_by_measure(i)
-        return self.pianoEnv(t-self.get_measure_start_time(i))*cur_chord(current_key*(t-self.get_measure_start_time(i)));
+        return self.pianoEnv(t)*cur_chord(current_key*(t-self.get_measure_start_time(i)));
 
     def get_func_by_measure(self,i):
         dnb = super().get_func_by_measure(i)
@@ -329,16 +400,19 @@ class RandomBlues(DrumAndBass):
         
 random_phrase = RandomBlues(get_weighted_blues_matrix())
 print(random_phrase.chord_progression)
+print(random_phrase.rhythm_pattern)
 
 
 test_sample = random_phrase.render_phrase()
 sd.play(test_sample)
+sd.stop()
 
 
 
 random_phrase1 = RandomBlues(get_weighted_blues_matrix())
+random_phrase1.render_phrase()
 random_phrase2 = RandomBlues(get_weighted_blues_matrix())
-
+random_phrase2.render_phrase()
 
 
 def createBasicLoop(t):
@@ -351,15 +425,6 @@ def createGuitarSound(t):
 
 
 
-def createADSR(A,D,S,R):
-    decay_rate = (1-S)/D;
-    release_rate = S/R;
-    return (lambda t,L: step(t)*t/A*(1-step(t-A))
-            +step(t-A)*(2*A-t)*decay_rate*(1-step(t-A-D))
-            +step(t-A-D)*S*(1-step(t-(L-R)))
-            +step(t-(L-R))*(((L-R)-t)*release_rate+S)*(1-step(t-L)));
-            
-
 
 
 
@@ -370,9 +435,13 @@ def createGuitar(t):
 
 
 
-
 def create_note(timbre,envolope,start,length,pitch):
     return (lambda t: timbre((t-start)*pitch)*envolope(t-start,length))
+
+def append_note(note,length,start_time,note_sequence=zero_function):    
+    return add_funcs(note_sequence,new_note(note,length))
+
+
 
 melody_time = 0
 
@@ -384,14 +453,11 @@ def new_note(note,length):
     melody_time = note_start+length
     return create_note(createGuitar,createADSR(.05,.025,.5,.2),note_start,length,equal_temperament[note])
     
-def add_funcs(f1,f2):
-    return (lambda t: (f1(t)+f2(t)))
+
 
 note_sequence = zero_function
 
-def append_note(note,length):
-    global note_sequence;
-    note_sequence = add_funcs(note_sequence,new_note(note,length*seconds_per_beat()))
+
 
 
 def star_spangled_banner():
@@ -433,8 +499,13 @@ def blues_scale():
 
 blues_scale()
 
-phrase_queue = queue.Queue()
 
+
+phrase_queue = queue.Queue()
+phrase_queue.put(random_phrase1)
+phrase_queue.put(random_phrase1)
+phrase_queue.put(random_phrase2)
+phrase_queue.put(random_phrase1)
 
 
 
@@ -449,36 +520,20 @@ def fill_buffer(frames, time):
     timedata = np.arange(time,time+frames/sr,1/sr)
     current_measure = fill_buffer.current_phrase.get_measure_by_time(timedata[0])
     end_measure = fill_buffer.current_phrase.get_measure_by_time(timedata[-1])
-    if (current_measure == end_measure):
-        measure_func = fill_buffer.current_phrase.get_func_by_measure(current_measure)
-        return measure_func(timedata);
-    elif(end_measure < current_measure and not phrase_queue.empty()):
+    if(end_measure < current_measure and not phrase_queue.empty()):
         print("Starting new measure and new phrase")
-        first_measure_func = fill_buffer.current_phrase.get_func_by_measure(current_measure)
         transition_time = fill_buffer.current_phrase.get_measure_start_time(end_measure)
-        left_half = first_measure_func(timedata)*(1-step(timedata-transition_time));
+        left_half = fill_buffer.current_phrase.get_prerender_by_time(timedata < transition_time);
         fill_buffer.current_phrase = phrase_queue.get();
         fill_buffer.current_phrase.start_time = transition_time;
-        second_measure_func = fill_buffer.current_phrase.get_func_by_measure(current_measure)
-        right_half = second_measure_func(timedata)*step(timedata-transition_time);
-        return left_half + right_half;
+        right_half = fill_buffer.current_phrase.get_prerender_by_time(timedata >= transition_time);
+        return np.append(left_half,right_half);
     else:
-        print("Starting new measure")
-        first_measure_func = fill_buffer.current_phrase.get_func_by_measure(current_measure)
-        second_measure_func = fill_buffer.current_phrase.get_func_by_measure(current_measure)
-        transition_time = fill_buffer.current_phrase.get_measure_start_time(end_measure)
-        left_half = first_measure_func(timedata)*(1-step(timedata-transition_time));
-        right_half = second_measure_func(timedata)*step(timedata-transition_time);
-        return left_half + right_half;
+        return get_prerender_by_time(timedata);
     
     
 
 fill_buffer.current_phrase = None
-phrase_queue.put(dnb_phrase)
-phrase_queue.put(random_phrase1)
-phrase_queue.put(random_phrase1)
-phrase_queue.put(random_phrase2)
-phrase_queue.put(random_phrase1)
 
 
 
