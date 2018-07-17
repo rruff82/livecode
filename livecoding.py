@@ -28,9 +28,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.    
     
 
-TODO:
-    Eliminate "click" when starting new measure
-
 """
 
 import numpy as np
@@ -38,6 +35,8 @@ import sounddevice as sd
 import matplotlib
 import matplotlib.pyplot as plt
 import queue
+
+
 from scipy import signal
 
 tau = np.pi*2
@@ -114,7 +113,7 @@ class Phrase:
     measures_per_phrase = 12
     beats_per_minute = 120
     start_time = 0
-    prerender = None
+    prerendered_data = None
 
     def seconds_per_beat(self):
         return 60/self.beats_per_minute;
@@ -150,28 +149,26 @@ class Phrase:
             t = np.arange(self.get_measure_start_time(i),self.get_measure_start_time(i)+self.seconds_per_measure(),1/sr)
             fn = self.get_func_by_measure(i)
             if (i == 0):
-                self.prerender = fn(t)
+                self.prerendered_data = fn(t)
             else:
-                self.prerender = np.append(self.prerender,fn(t))
-            
+                self.prerendered_data = np.append(self.prerendered_data,fn(t))
+    
+    def time_to_frame(self,t):
+        return int(((t-self.start_time)%self.seconds_per_phrase())*sr)
+        
     def get_prerender_by_time(self,t):
-        if (self.prerender is None):
+        if (self.prerendered_data is None):
             self.prerender()
-        start_frame = int((t[0]-self.start_time%self.seconds_per_phrase())/sr)
-        end_frame = int((t[-1]-self.start_time%self.seconds_per_phrase())/sr)
+        start_frame = int(((t[0]-self.start_time)%self.seconds_per_phrase())*sr)
+        end_frame = (start_frame+len(t))%len(self.prerendered_data)
         
         if (end_frame > start_frame):
-            self.prerender[start_frame:end_frame]
+            return self.prerendered_data[start_frame:end_frame]
         else:
-            np.append(self.prerender[start_frame:],self.prerender[:end_frame])
+            return np.append(self.prerendered_data[start_frame:],self.prerendered_data[:end_frame])
             
-    
-            
-    
 
-
-null_phrase = Phrase();
-
+        
 
 class DrumAndBass(Phrase):
     def snare_envelope(self,x):
@@ -211,17 +208,6 @@ class DrumAndBass(Phrase):
 
 
 
-dnb_phrase = DrumAndBass();
-
-
-dnb_phrase.prerender()
-
-sd.play(dnb_phrase.get_prerender_by_time(np.arange(0,1,1/sr)))
-
-#phrase_test = dnb_phrase.render_phrase()
-#sd.play(phrase_test)
-
-
 class SimpleBlues(DrumAndBass):
     def thick_sound(self,t):
         return (A440(t)+A440(2*t)/2+A440(3*t)/3+A440(4*t)/4+A440(5*t)/5+A440(6*t)/6+A440(8*t)/8)/2;
@@ -248,7 +234,7 @@ class SimpleBlues(DrumAndBass):
         dnb = super().get_func_by_measure(i)
         return (lambda t: (.5*self.createPiano(t,i)+2*dnb(t))/3);
 
-piano_phrase = SimpleBlues()
+
 
 
 
@@ -308,10 +294,7 @@ index_to_number = np.matrix([[1,0,0,0,0,0,0],
                              [0,0,0,0,0,6,0],
                              [0,0,0,0,0,0,7]])
     
-start_vec = np.matrix([[1,0,0,0,0,0,0]])
 
-edge_choices = np.matmul(start_vec,blues_matrix)
-np.matmul(edge_choices,index_to_number)
 
 
 def random_walk(pos,adj_mat):
@@ -332,7 +315,6 @@ def create_walk(start_pos,adj_mat,num_steps):
             steps[i] = random_walk(steps[i-1],adj_mat)
     return steps;
 
-test_walk = create_walk(1,blues_matrix,12)
 
 
 def random_rhythm(num_frames,density=.5):
@@ -355,10 +337,7 @@ def createADSR(A,D,S,R):
 def create_note_env(start,length,ADSR=createADSR(1/64,1/32,.75,1/32)):
     return (lambda t: ADSR(t-start,length));
                         
-test_env = create_note_env(0,1)
-plotfunc(test_env)
 
-rhythm_pattern = random_rhythm(16)
 
 def generate_envolope_from_rhythm(pattern):
     env = zero_function
@@ -367,9 +346,7 @@ def generate_envolope_from_rhythm(pattern):
             env = add_funcs(env,create_note_env(i,1))
     return env
 
-test_env = generate_envolope_from_rhythm(rhythm_pattern)
 
-plotfunc(test_env,0,16)
     
 class RandomBlues(DrumAndBass):
     chord_progression = np.array(0)
@@ -398,21 +375,12 @@ class RandomBlues(DrumAndBass):
 
        
         
-random_phrase = RandomBlues(get_weighted_blues_matrix())
-print(random_phrase.chord_progression)
-print(random_phrase.rhythm_pattern)
-
-
-test_sample = random_phrase.render_phrase()
-sd.play(test_sample)
-sd.stop()
-
 
 
 random_phrase1 = RandomBlues(get_weighted_blues_matrix())
-random_phrase1.render_phrase()
+random_phrase1.prerender()
 random_phrase2 = RandomBlues(get_weighted_blues_matrix())
-random_phrase2.render_phrase()
+random_phrase2.prerender()
 
 
 def createBasicLoop(t):
@@ -497,7 +465,7 @@ def blues_scale():
         append_note(n[0],n[1])
     plotnplay(note_sequence,melody_time)  
 
-blues_scale()
+
 
 
 
@@ -509,40 +477,53 @@ phrase_queue.put(random_phrase1)
 
 
 
-def fill_buffer(frames, time):
-    if (fill_buffer.current_phrase is None):
-        if (phrase_queue.empty()):
-            return np.full(frames,0);
-        else:
-            fill_buffer.current_phrase = phrase_queue.get();
-            fill_buffer.current_phrase.start_time = time;
-            print("Starting new phrase")
-    timedata = np.arange(time,time+frames/sr,1/sr)
-    current_measure = fill_buffer.current_phrase.get_measure_by_time(timedata[0])
-    end_measure = fill_buffer.current_phrase.get_measure_by_time(timedata[-1])
-    if(end_measure < current_measure and not phrase_queue.empty()):
-        print("Starting new measure and new phrase")
-        transition_time = fill_buffer.current_phrase.get_measure_start_time(end_measure)
-        left_half = fill_buffer.current_phrase.get_prerender_by_time(timedata < transition_time);
-        fill_buffer.current_phrase = phrase_queue.get();
-        fill_buffer.current_phrase.start_time = transition_time;
-        right_half = fill_buffer.current_phrase.get_prerender_by_time(timedata >= transition_time);
-        return np.append(left_half,right_half);
-    else:
-        return get_prerender_by_time(timedata);
-    
-    
-
-fill_buffer.current_phrase = None
-
-
 
 
 def callback(indata, outdata, frames, time, status):
+    """ This is the callback function for my audio stream.
+        It reads a phrase from the global "phrase_queue", and gradually adds frames
+        to the buffer from the prerendered data.
+        At the end of the phrase, it checks for a new phrase to play and if not loops the old.
+    """
     if status:
         print(status) 
-    outdata[:,0] = fill_buffer(frames, time.outputBufferDacTime)
+    if (callback.current_phrase is None):
+        if (phrase_queue.empty()):
+            outdata[:,0] = np.full(frames,0);
+            return;
+        else:
+            callback.current_phrase = phrase_queue.get();
+            callback.current_phrase.start_time = time.outputBufferDacTime;
+            callback.current_frame = 0
+            print("Starting new phrase")
+    start_frame = callback.current_frame
+    end_frame = start_frame+frames 
+    if (end_frame < len(callback.current_phrase.prerendered_data)): 
+        outdata[:,0] = callback.current_phrase.prerendered_data[start_frame:end_frame]
+        callback.current_frame = end_frame
+    elif (phrase_queue.empty()):
+        print("Looping phrase")
+        head_len = len(callback.current_phrase.prerendered_data)-start_frame-1
+        tail_start = head_len+1
+        tail_len = end_frame-len(callback.current_phrase.prerendered_data)-1
+        outdata[0:head_len,0] = callback.current_phrase.prerendered_data[start_frame:-1]
+        outdata[tail_start:-1,0] = callback.current_phrase.prerendered_data[0:tail_len]
+        callback.current_frame = tail_len
+    else:
+        print("Transitioning to new phrase")
+        head_len = len(callback.current_phrase.prerendered_data)-start_frame-1
+        tail_start = head_len+1
+        tail_len = end_frame-len(callback.current_phrase.prerendered_data)-1
+        outdata[0:head_len,0] = callback.current_phrase.prerendered_data[start_frame:-1]
+        callback.current_phrase = phrase_queue.get();
+        callback.current_phrase.start_time = time.outputBufferDacTime+head_len/sr;    
+        outdata[tail_start:-1,0] = callback.current_phrase.prerendered_data[0:tail_len]
+        callback.current_frame = tail_len
     return;
+    
+callback.current_phrase = None
+callback.current_frame = 0
+
     
 def finished_callback():
     print("we're done, now what?")
@@ -552,11 +533,7 @@ strm = sd.Stream(channels=1, callback=callback, samplerate=sr, blocksize=blocksi
 strm.start()
 
 
-
-
-phrase_queue.put(piano_phrase)
-
-strm.stop()
+#strm.stop()
 
 
 
