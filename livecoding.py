@@ -38,6 +38,7 @@ import queue
 
 
 from scipy import signal
+from scipy.io import wavfile
 
 tau = np.pi*2
 sr = 44100
@@ -65,6 +66,11 @@ def add_funcs(f1,f2):
 def step(t):
     return np.heaviside(t,1);
 
+def triwave(t):
+    return np.abs(((t-tau/4)%tau)/np.pi-1)*2-1
+
+
+
 def plotfunc(fn,a=0,b=1):
     x = np.linspace(a,b,500)
     fig, graph = plt.subplots()
@@ -86,8 +92,70 @@ def plotnplay(fn,dur=1):
     playfunc(fn,dur)
     return;
     
+
+def record_sound(dur=2):
+    raw = sd.rec(dur*sr,samplerate=sr,blocking=True,channels=1);
+    return np.reshape(raw,(len(raw)))
+
+
+def plot_spectrogram(x):
+    f, t, Sxx = signal.spectrogram(x, sr)
+    plt.pcolormesh(t, f, Sxx)
+    plt.ylabel('Frequency [Hz]')
+    plt.xlabel('Time [sec]')
+    plt.ylim([0,1500])
+    plt.show()
+
+
+def time_to_frame(t):
+    return int(t*sr)
+
+mic_check = wavfile.read("miccheck.wav")[1]
+
+mic_start = 0.65
+mic_end = 0.85
+mic_len = mic_end-mic_start
+check_end =1.2
+
+def remix_fn(t):
+    return ((mic_start+t)*step(mic_len-t)+step(t-mic_len)*(mic_start+t-mic_len)*step(mic_len*2-t)
+           +step(t-mic_len*2)*(mic_start+(t%(mic_len/2)))*step(mic_len*4-t)
+           +step(t-mic_len*4)*(t-mic_len*4+mic_start)*step(mic_len*7-t))
+
+#plotfunc(remix_fn)
+
+def backwards(t):
+    return 2-t
+
+def double_time(t):
+    return (t*2)%2
+
+def half_time(t):
+    return (t+mic_start)/2
+
+def remix_sound(snd,fn,dur=2):
+    t = np.arange(0,dur,1/sr)
+    for s in range(len(t)):
+        t[s] = snd[int(fn(t[s])*sr)]
+    return t
     
+#z = remix_sound(y,remix_fn)
+#sd.play(z)
+
     
+def remix_fn_2(t):
+    return .5*mic_len*(triwave(t*6*tau-tau/4)*.5+.5)+mic_start
+
+def remix_fn_3(t):
+    return remix_fn(t)*step(t-.5)+step(.5-t)*remix_fn_2(t)
+
+#plotfunc(remix_fn_3)
+
+z = remix_sound(mic_check,remix_fn_3)
+sd.play(z)
+
+#plot_spectrogram(z)
+
 def A440(t):
     return np.sin(tau*440*t);
 
